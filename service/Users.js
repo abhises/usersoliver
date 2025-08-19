@@ -1,0 +1,730 @@
+export default class Users {
+  static REDIS_KEY_PREFIX = Object.freeze({
+    CRITICAL_USER_DATA: "cud:",
+    PRESENCE_SUMMARY_USER: "presence:summary:user:",
+    PRESENCE_OVERRIDE_USER: "presence:override:user:",
+    USERNAME_TO_UID: "username:to:uid:",
+    UID_TO_USERNAME: "uid:to:username:",
+  });
+
+  static REDIS_TIMING_SECONDS = Object.freeze({
+    HEARTBEAT_INTERVAL: 25,
+    PRESENCE_TTL: 300,
+    CRITICAL_USER_DATA_TTL: 300,
+  });
+
+  static PRESENCE_MODE = Object.freeze({
+    REAL: "real",
+    AWAY: "away",
+    OFFLINE: "offline",
+  });
+
+  static USERNAME_POLICY = Object.freeze({
+    MIN_LEN: 3,
+    MAX_LEN: 30,
+    REGEX: /^[a-zA-Z0-9._-]{3,30}$/,
+  });
+
+  static LOGGER_FLAG_USERS = "users";
+
+  /* ================================
+   HELPER FUNCTIONS (INTERNAL)
+   ================================ */
+
+  /**
+   * Normalize username to lowercase, trimmed.
+   * @param {string} username
+   */
+  static normalizeUsername(username) {
+    const safe = (username ?? "").toString().trim().toLowerCase();
+    return safe;
+  }
+
+  /**
+   * Validate username format against policy.
+   * @param {string} username
+   * @returns {boolean}
+   */
+  isUsernameFormatValid(username) {
+    const u = this.normalizeUsername(username);
+    if (
+      u.length < this.USERNAME_POLICY.MIN_LEN ||
+      u.length > this.USERNAME_POLICY.MAX_LEN
+    )
+      return false;
+    return this.USERNAME_POLICY.REGEX.test(u);
+  }
+
+  /**
+   * Compute initials from a display name.
+   * @param {string} displayName
+   * @returns {string}
+   */
+  initialsFromDisplayName(displayName) {
+    const parts = (displayName ?? "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2);
+    return parts.map((p) => (p[0] || "").toUpperCase()).join("");
+  }
+
+  /**
+   * Build Redis keys
+   */
+  keyCriticalUserData(uid) {
+    return `${this.REDIS_KEY_PREFIX.CRITICAL_USER_DATA}${uid}`;
+  }
+  keyPresenceSummary(uid) {
+    return `${this.REDIS_KEY_PREFIX.PRESENCE_SUMMARY_USER}${uid}`;
+  }
+  keyPresenceOverride(uid) {
+    return `${this.REDIS_KEY_PREFIX.PRESENCE_OVERRIDE_USER}${uid}`;
+  }
+  keyUsernameToUid(name) {
+    return `${this.REDIS_KEY_PREFIX.USERNAME_TO_UID}${this.normalizeUsername(
+      name
+    )}`;
+  }
+  keyUidToUsername(uid) {
+    return `${this.REDIS_KEY_PREFIX.UID_TO_USERNAME}${uid}`;
+  }
+  /**
+   * Read JSON value from Redis (string→object).
+   */
+  static async redisGetJson(key) {
+    const raw = await RedisClient.get(key);
+    if (!raw) return null;
+    try {
+      return typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch {
+      return null;
+    }
+  }
+
+  static validateInputs(rulesObject) {
+    // Example: Formatting.sanitizeValidate({ uid: 'required|string|trim' }, data)
+    // We will assume Formatting.sanitizeValidate returns sanitized data or throws.
+    return Formatting.sanitizeValidate(rulesObject);
+  }
+
+  /**
+   * Set JSON value in Redis with TTL (seconds).
+   */
+  static async redisSetJson(key, obj, ttlSeconds = 0) {
+    const value = JSON.stringify(obj ?? {});
+    if (ttlSeconds > 0) {
+      await RedisClient.set(key, value, { expiry: ttlSeconds });
+    } else {
+      await RedisClient.set(key, value);
+    }
+  }
+
+  /**
+   * Validate inputs via Formatting.sanitizeValidate (REQUIRED).
+   * Throws if invalid.
+   */
+
+  /* ----------------------------------------
+     REDIS RUNTIME: CRITICAL USER DATA (CUD)
+     ---------------------------------------- */
+
+  /**
+   * Return critical user data (Redis authoritative).
+   * Hydrates from Postgres on miss (username/displayName/avatar) and merges live presence.
+   *
+   * @param {string} uid
+   * @returns {Promise<{username:string, displayName:string, avatar:string, online:boolean, status:'online'|'offline'|'away'}|null>}
+   */
+  static async getCriticalUserData(uid) {
+    try {
+      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
+        uid,
+      });
+
+      // 1) Try Redis CUD
+      const cudKey = keyCriticalUserData(vUid);
+      let cud = await redisGetJson(cudKey);
+
+      // 2) Merge presence (override→summary) from Redis every read
+      const presence = await this.getOnlineStatus(vUid);
+
+      if (cud) {
+        const merged = {
+          ...cud,
+          online: presence.online,
+          status: presence.status,
+        };
+        return merged;
+      }
+
+      // 3) Hydrate from Postgres (durables) — minimal SELECT to get username/displayName/avatar
+      const userRow = await DB.query(
+        "SELECT username_lower AS username, display_name AS display_name, avatar_url AS avatar FROM users WHERE uid = $1 LIMIT 1",
+        [vUid]
+      );
+      const record = userRow?.rows?.[0];
+      if (!record) return null;
+
+      const hydrated = {
+        username: record.username || "",
+        displayName: record.display_name || "",
+        avatar: record.avatar || "",
+        online: presence.online,
+        status: presence.status,
+      };
+
+      // 4) Warm Redis CUD
+      await redisSetJson(
+        cudKey,
+        hydrated,
+        REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
+      );
+
+      Logger.writeLog?.({
+        flag: LOGGER_FLAG_USERS,
+        action: "getCriticalUserData_hydrated",
+        message: "Hydrated CUD from Postgres and cached in Redis",
+        data: { uid: vUid },
+      });
+
+      return hydrated;
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.getCriticalUserData", uid });
+      return null;
+    }
+  }
+
+  /**
+   * Batched critical user data by UIDs (order-preserving). Redis-first; hydrate misses.
+   * @param {string[]} uids
+   * @returns {Promise<Array<object>>}
+   */
+  static async getCriticalUsersData(uids = []) {
+    try {
+      const { uids: vUids } = validateInputs({
+        uids: "required|array|min:1|max:200",
+        "uids.*": "required|string|trim",
+      })({ uids });
+
+      // 1) MGET CUD keys
+      const keys = vUids.map(keyCriticalUserData);
+      const rawValues = await RedisClient.mget(...keys);
+      const results = [];
+      const misses = [];
+
+      for (let i = 0; i < vUids.length; i++) {
+        const uid = vUids[i];
+        const raw = rawValues[i];
+        if (raw) {
+          try {
+            const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+            results.push({ uid, ...parsed });
+          } catch {
+            misses.push(uid);
+          }
+        } else {
+          misses.push(uid);
+        }
+      }
+
+      // 2) Hydrate misses individually (reuse single getCriticalUserData to ensure presence merge)
+      for (const mUid of misses) {
+        const one = await this.getCriticalUserData(mUid);
+        results.push({
+          uid: mUid,
+          ...(one || {
+            username: "",
+            displayName: "",
+            avatar: "",
+            online: false,
+            status: "offline",
+          }),
+        });
+      }
+
+      // 3) Preserve input order
+      const map = new Map(results.map((r) => [r.uid, r]));
+      return vUids.map((u) => map.get(u));
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.getCriticalUsersData",
+        uids,
+      });
+      return [];
+    }
+  }
+
+  /* ----------------------------------------
+     REDIS RUNTIME: PRESENCE
+     ---------------------------------------- */
+
+  /**
+   * Resolve current presence for a user from Redis.
+   * Rule: presenceOverride (offline/away/real) → then presence summary.
+   * @param {string} uid
+   * @returns {Promise<{online:boolean, status:'online'|'offline'|'away'}>}
+   */
+  static async getOnlineStatus(uid) {
+    try {
+      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
+        uid,
+      });
+
+      // 1) Check override
+      const override = await RedisClient.get(keyPresenceOverride(vUid));
+      if (override === PRESENCE_MODE.OFFLINE)
+        return { online: false, status: "offline" };
+      if (override === PRESENCE_MODE.AWAY)
+        return { online: true, status: "away" };
+
+      // 2) Check summary key
+      const summary = await RedisClient.get(keyPresenceSummary(vUid));
+      const isOnline = !!summary;
+      return { online: isOnline, status: isOnline ? "online" : "offline" };
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.getOnlineStatus", uid });
+      return { online: false, status: "offline" };
+    }
+  }
+
+  /**
+   * Batch presence for multiple users (20–50 typical). Redis-only.
+   * @param {string[]} uids
+   * @returns {Promise<Array<{uid:string, online:boolean, status:string}>>}
+   */
+  static async getBatchOnlineStatus(uids = []) {
+    try {
+      const { uids: vUids } = validateInputs({
+        uids: "required|array|min:1|max:500",
+        "uids.*": "required|string|trim",
+      })({ uids });
+
+      // overrides
+      const overrideKeys = vUids.map(keyPresenceOverride);
+      const overrides = await RedisClient.mget(...overrideKeys);
+
+      // summaries
+      const summaryKeys = vUids.map(keyPresenceSummary);
+      const summaries = await RedisClient.mget(...summaryKeys);
+
+      const out = [];
+      for (let i = 0; i < vUids.length; i++) {
+        const uid = vUids[i];
+        const ov = overrides[i];
+        if (ov === PRESENCE_MODE.OFFLINE) {
+          out.push({ uid, online: false, status: "offline" });
+          continue;
+        }
+        if (ov === PRESENCE_MODE.AWAY) {
+          out.push({ uid, online: true, status: "away" });
+          continue;
+        }
+
+        const isOnline = !!summaries[i];
+        out.push({
+          uid,
+          online: isOnline,
+          status: isOnline ? "online" : "offline",
+        });
+      }
+      return out;
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.getBatchOnlineStatus",
+        uids,
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Server-side socket hook: refresh presence summary TTL, optionally bump durable lastActivityAt.
+   * (No frontend code here — this is called by your socket server.)
+   * @param {string} uid
+   * @param {string} connId
+   * @returns {Promise<void>}
+   */
+  static async updatePresenceFromSocket(uid, connId) {
+    try {
+      const { uid: vUid, connId: vConnId } = validateInputs({
+        uid: "required|string|trim",
+        connId: "required|string|trim",
+      })({ uid, connId });
+
+      // Refresh presence summary TTL
+      await RedisClient.set(keyPresenceSummary(vUid), "1", {
+        expiry: REDIS_TIMING_SECONDS.PRESENCE_TTL,
+      });
+
+      // OPTIONAL: Throttle durable lastActivityAt write in Postgres (e.g., once per 60s)
+      // Reads are Redis-only; this is purely for analytics/labels.
+      await DB.query(
+        "UPDATE users SET last_activity_at = NOW() WHERE uid = $1 AND (last_activity_at IS NULL OR NOW() - last_activity_at > INTERVAL '60 seconds')",
+        [vUid]
+      );
+
+      // Bust CUD so next read merges fresh presence if needed
+      await RedisClient.del(keyCriticalUserData(vUid));
+
+      Logger.writeLog?.({
+        flag: LOGGER_FLAG_USERS,
+        action: "updatePresenceFromSocket",
+        message: "Presence heartbeat processed",
+        data: { uid: vUid, connId: vConnId },
+      });
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.updatePresenceFromSocket",
+        uid,
+        connId,
+      });
+    }
+  }
+
+  /**
+   * Apply presence override in Redis (authoritative for UI), and persist preference durably for rebuild.
+   * @param {string} uid
+   * @param {'real'|'away'|'offline'} mode
+   * @returns {Promise<boolean>}
+   */
+  static async setPresenceOverride(uid, mode) {
+    try {
+      const { uid: vUid, mode: vMode } = validateInputs({
+        uid: "required|string|trim",
+        mode: `required|string|in:${Object.values(PRESENCE_MODE).join(",")}`,
+      })({ uid, mode });
+
+      await RedisClient.set(keyPresenceOverride(vUid), vMode); // no TTL
+      await RedisClient.del(keyCriticalUserData(vUid)); // bust CUD
+
+      // Persist preference for rebuild only
+      await DB.query(
+        "UPDATE user_settings SET presence_preference = $1, updated_at = NOW() WHERE uid = $2",
+        [vMode, vUid]
+      );
+
+      Logger.writeLog?.({
+        flag: LOGGER_FLAG_USERS,
+        action: "setPresenceOverride",
+        message: "Presence override updated",
+        data: { uid: vUid, mode: vMode },
+      });
+
+      return true;
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.setPresenceOverride",
+        uid,
+        mode,
+      });
+      return false;
+    }
+  }
+
+  /* ----------------------------------------
+     REDIS RUNTIME: USERNAME
+     ---------------------------------------- */
+
+  /**
+   * Username availability via Redis map only.
+   * @param {string} username
+   * @returns {Promise<boolean>} true if TAKEN, false if FREE
+   */
+  static async isUsernameTaken(username) {
+    try {
+      const { username: vUsername } = validateInputs({
+        username: "required|string|trim|lowercase",
+      })({ username });
+
+      if (!isUsernameFormatValid(vUsername)) return true; // invalid format treated as not available
+
+      const ownerUid = await RedisClient.get(keyUsernameToUid(vUsername));
+      return !!ownerUid;
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.isUsernameTaken", username });
+      return true;
+    }
+  }
+
+  /**
+   * Claim or change username in Redis (authoritative), then persist durable copy in Postgres for rebuild.
+   * - Enforces format and uniqueness (atomic check).
+   * - Updates CUD and uid→username mirror.
+   * @param {string} uid
+   * @param {string} username
+   * @returns {Promise<{ success: boolean, previous?: string }>}
+   */
+  static async setUsername(uid, username) {
+    try {
+      const { uid: vUid, username: vUsernameRaw } = validateInputs({
+        uid: "required|string|trim",
+        username: "required|string|trim",
+      })({ uid, username });
+
+      const vUsername = normalizeUsername(vUsernameRaw);
+      if (!isUsernameFormatValid(vUsername)) {
+        throw new Error("INVALID_USERNAME_FORMAT");
+      }
+
+      const mapKey = keyUsernameToUid(vUsername);
+
+      // Atomic claim: if key exists and not owned by uid -> conflict
+      const existingOwner = await RedisClient.get(mapKey);
+      if (existingOwner && existingOwner !== vUid) {
+        throw new Error("USERNAME_TAKEN");
+      }
+
+      // Fetch previous username (if any) from mirror
+      const oldUsername = await RedisClient.get(keyUidToUsername(vUid));
+
+      // Set mappings
+      await RedisClient.set(mapKey, vUid);
+      await RedisClient.set(keyUidToUsername(vUid), vUsername);
+
+      // Update durable copy
+      await DB.query(
+        "UPDATE users SET username_lower = $1, updated_at = NOW() WHERE uid = $2",
+        [vUsername, vUid]
+      );
+
+      // Update CUD cache if exists
+      const cudKey = keyCriticalUserData(vUid);
+      const cud = await redisGetJson(cudKey);
+      if (cud) {
+        cud.username = vUsername;
+        await redisSetJson(
+          cudKey,
+          cud,
+          REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
+        );
+      }
+
+      Logger.writeLog?.({
+        flag: LOGGER_FLAG_USERS,
+        action: "setUsername",
+        message: "Username claimed/updated",
+        data: { uid: vUid, username: vUsername, previous: oldUsername || null },
+      });
+
+      // If username changed, optionally free old map entry
+      if (oldUsername && oldUsername !== vUsername) {
+        const oldMapKey = keyUsernameToUid(oldUsername);
+        const currOwner = await RedisClient.get(oldMapKey);
+        if (currOwner === vUid) {
+          await RedisClient.del(oldMapKey);
+        }
+      }
+
+      return { success: true, previous: oldUsername || undefined };
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.setUsername",
+        uid,
+        username,
+      });
+      return { success: false };
+    }
+  }
+
+  /* ----------------------------------------
+     POSTGRES DURABLE: DYNAMIC ACCESS
+     ---------------------------------------- */
+
+  /**
+   * Read a single field from a durable table (PostgreSQL).
+   * @param {string} uid
+   * @param {string} tableName - e.g., 'users', 'user_profiles', 'user_settings'
+   * @param {string} fieldKey  - column name (or JSON path handled by SQL if needed)
+   * @returns {Promise<any>}
+   */
+  static async getUserField(uid, tableName, fieldKey) {
+    try {
+      const {
+        uid: vUid,
+        tableName: vTable,
+        fieldKey: vField,
+      } = validateInputs({
+        uid: "required|string|trim",
+        tableName: "required|string|trim|lowercase",
+        fieldKey: "required|string|trim|lowercase",
+      })({ uid, tableName, fieldKey });
+
+      // Securely whitelist table and field names if you maintain an allowlist.
+      // For now, parameterize value and use dynamic identifiers cautiously.
+      const sql = `SELECT ${vField} AS value FROM ${vTable} WHERE uid = $1 LIMIT 1`;
+      const res = await DB.query(sql, [vUid]);
+      return res?.rows?.[0]?.value ?? null;
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.getUserField",
+        uid,
+        tableName,
+        fieldKey,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Update a single field in a durable table (PostgreSQL).
+   * NOTE: Use this for timestamps or any other field (no separate timestamp setter).
+   * @param {string} uid
+   * @param {string} tableName - e.g., 'users', 'user_profiles', 'user_settings'
+   * @param {string} fieldKey  - column name
+   * @param {any} value
+   * @returns {Promise<boolean>}
+   */
+  static async updateUserField(uid, tableName, fieldKey, value) {
+    try {
+      const {
+        uid: vUid,
+        tableName: vTable,
+        fieldKey: vField,
+      } = validateInputs({
+        uid: "required|string|trim",
+        tableName: "required|string|trim|lowercase",
+        fieldKey: "required|string|trim|lowercase",
+      })({ uid, tableName, fieldKey });
+
+      // For timestamps, caller can pass value or use DateTime to generate now.
+      const res = await DB.query(
+        `UPDATE ${vTable} SET ${vField} = $1, updated_at = NOW() WHERE uid = $2`,
+        [value, vUid]
+      );
+
+      Logger.writeLog?.({
+        flag: LOGGER_FLAG_USERS,
+        action: "updateUserField",
+        message: "Durable field updated",
+        data: { uid: vUid, tableName: vTable, fieldKey: vField },
+      });
+
+      return (res?.rowCount ?? 0) > 0;
+    } catch (err) {
+      ErrorHandler.capture?.(err, {
+        where: "Users.updateUserField",
+        uid,
+        tableName,
+        fieldKey,
+      });
+      return false;
+    }
+  }
+
+  /* ----------------------------------------
+     UI JSON BUILDERS (COMPOSE REDIS + PG)
+     ---------------------------------------- */
+
+  /**
+   * Build minimal user data JSON for UI (top bar / header, etc.)
+   * Fields: displayName, userName, publicUid, avatar, initials, role, isNewUser
+   * @param {string} uid
+   * @returns {Promise<object|null>}
+   */
+  static async buildUserData(uid) {
+    try {
+      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
+        uid,
+      });
+      const cud = await this.getCriticalUserData(vUid);
+      if (!cud) return null;
+
+      const row = await DB.query(
+        "SELECT public_uid AS public_uid, role, is_new_user FROM users WHERE uid = $1 LIMIT 1",
+        [vUid]
+      );
+      const base = row?.rows?.[0] || {};
+
+      const out = {
+        displayName: cud.displayName || "",
+        userName: cud.username || "",
+        publicUid: base.public_uid || "",
+        avatar: cud.avatar || "",
+        initials: initialsFromDisplayName(cud.displayName || ""),
+        role: base.role || "user",
+        isNewUser: !!base.is_new_user,
+      };
+
+      return out;
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.buildUserData", uid });
+      return null;
+    }
+  }
+
+  /**
+   * Build user settings JSON from durable table.
+   * Example shape: { localeConfig, notificationsConfig, callVideoMessage? }
+   * @param {string} uid
+   * @returns {Promise<object>}
+   */
+  static async buildUserSettings(uid) {
+    try {
+      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
+        uid,
+      });
+      const res = await DB.query(
+        "SELECT locale, notifications, call_video_message FROM user_settings WHERE uid = $1 LIMIT 1",
+        [vUid]
+      );
+      const s = res?.rows?.[0] || {};
+      return {
+        localeConfig: s.locale ?? null,
+        notificationsConfig: s.notifications ?? null,
+        callVideoMessage: s.call_video_message ?? null,
+      };
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.buildUserSettings", uid });
+      return {};
+    }
+  }
+
+  /**
+   * Build public profile JSON by merging durable profile + CUD + required public fields.
+   * @param {string} uid
+   * @returns {Promise<object|null>}
+   */
+  static async buildUserProfile(uid) {
+    try {
+      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
+        uid,
+      });
+
+      const cud = await this.getCriticalUserData(vUid);
+      const userRes = await DB.query(
+        "SELECT public_uid FROM users WHERE uid = $1 LIMIT 1",
+        [vUid]
+      );
+      const profRes = await DB.query(
+        "SELECT bio, gender, age, body_type, hair_color, country, cover_image, background_images, social_urls, additional_urls FROM user_profiles WHERE uid = $1 LIMIT 1",
+        [vUid]
+      );
+
+      const user = userRes?.rows?.[0] || {};
+      const prof = profRes?.rows?.[0] || {};
+      if (!cud) return null;
+
+      return {
+        uid: vUid,
+        publicUid: user.public_uid || "",
+        displayName: cud.displayName || "",
+        userName: cud.username || "",
+        avatar: cud.avatar || "",
+        bio: prof.bio || "",
+        gender: prof.gender || "",
+        age: prof.age ?? null,
+        bodyType: prof.body_type || "",
+        hairColor: prof.hair_color || "",
+        country: prof.country || "",
+        coverImage: prof.cover_image || "",
+        backgroundImages: prof.background_images || [],
+        socialUrls: prof.social_urls || [],
+        additionalUrls: prof.additional_urls || [],
+      };
+    } catch (err) {
+      ErrorHandler.capture?.(err, { where: "Users.buildUserProfile", uid });
+      return null;
+    }
+  }
+}
