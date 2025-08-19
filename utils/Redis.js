@@ -4,8 +4,7 @@
  */
 
 import redis from "redis";
-import Logger from "../Logger.js";
-import ErrorHandler from "../ErrorHandler.js";
+import { ErrorHandler, Logger } from "../utils/index.js";
 
 // Cached environment variables
 let cachedEnvironment = null;

@@ -1,3 +1,11 @@
+import {
+  ErrorHandler,
+  Logger,
+  DB,
+  SafeUtils,
+  RedisClient,
+} from "../utils/index.js";
+
 export default class Users {
   static REDIS_KEY_PREFIX = Object.freeze({
     CRITICAL_USER_DATA: "cud:",
@@ -37,6 +45,7 @@ export default class Users {
    */
   static normalizeUsername(username) {
     const safe = (username ?? "").toString().trim().toLowerCase();
+    // console.log("Normalizing username:", safe);
     return safe;
   }
 
@@ -45,7 +54,7 @@ export default class Users {
    * @param {string} username
    * @returns {boolean}
    */
-  isUsernameFormatValid(username) {
+  static isUsernameFormatValid(username) {
     const u = this.normalizeUsername(username);
     if (
       u.length < this.USERNAME_POLICY.MIN_LEN ||
@@ -81,12 +90,12 @@ export default class Users {
   keyPresenceOverride(uid) {
     return `${this.REDIS_KEY_PREFIX.PRESENCE_OVERRIDE_USER}${uid}`;
   }
-  keyUsernameToUid(name) {
+  static keyUsernameToUid(name) {
     return `${this.REDIS_KEY_PREFIX.USERNAME_TO_UID}${this.normalizeUsername(
       name
     )}`;
   }
-  keyUidToUsername(uid) {
+  static keyUidToUsername(uid) {
     return `${this.REDIS_KEY_PREFIX.UID_TO_USERNAME}${uid}`;
   }
   /**
@@ -103,9 +112,10 @@ export default class Users {
   }
 
   static validateInputs(rulesObject) {
-    // Example: Formatting.sanitizeValidate({ uid: 'required|string|trim' }, data)
-    // We will assume Formatting.sanitizeValidate returns sanitized data or throws.
-    return Formatting.sanitizeValidate(rulesObject);
+    // Example: SafeUtils.sanitizeValidate({ uid: 'required|string|trim' }, data)
+    // We will assume SafeUtils.sanitizeValidate returns sanitized data or throws.
+    // console.log("Validating inputs:", rulesObject);
+    return SafeUtils.sanitizeValidate(rulesObject);
   }
 
   /**
@@ -121,7 +131,7 @@ export default class Users {
   }
 
   /**
-   * Validate inputs via Formatting.sanitizeValidate (REQUIRED).
+   * Validate inputs via SafeUtils.sanitizeValidate (REQUIRED).
    * Throws if invalid.
    */
 
@@ -456,21 +466,32 @@ export default class Users {
    * @returns {Promise<{ success: boolean, previous?: string }>}
    */
   static async setUsername(uid, username) {
+    // console.log("Setting username:", uid, username);
     try {
-      const { uid: vUid, username: vUsernameRaw } = validateInputs({
-        uid: "required|string|trim",
-        username: "required|string|trim",
-      })({ uid, username });
+      const { uid: vUid, username: vUsernameRaw } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
+        username: {
+          value: username,
+          type: "string",
+          required: true,
+          trim: true,
+        },
+      });
 
-      const vUsername = normalizeUsername(vUsernameRaw);
-      if (!isUsernameFormatValid(vUsername)) {
+      // console.log("Setting username: lower", vUid, vUsernameRaw);
+
+      const vUsername = this.normalizeUsername(vUsernameRaw);
+      if (!this.isUsernameFormatValid(vUsername)) {
         throw new Error("INVALID_USERNAME_FORMAT");
       }
+      // console.log("Setting username: normalized");
 
-      const mapKey = keyUsernameToUid(vUsername);
+      const mapKey = this.keyUsernameToUid(vUsername);
+      // console.log("Setting username: mapKey", mapKey);
 
       // Atomic claim: if key exists and not owned by uid -> conflict
       const existingOwner = await RedisClient.get(mapKey);
+      // console.log("Setting username: existingOwner", existingOwner);
       if (existingOwner && existingOwner !== vUid) {
         throw new Error("USERNAME_TAKEN");
       }
