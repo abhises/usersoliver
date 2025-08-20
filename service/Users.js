@@ -613,11 +613,16 @@ export default class Users {
           trim: true,
         },
       });
-
+      console.log("getUserField", {
+        uid: vUid,
+        tableName: vTable,
+        fieldKey: vField,
+      });
       // Securely whitelist table and field names if you maintain an allowlist.
       // For now, parameterize value and use dynamic identifiers cautiously.
       const sql = `SELECT ${vField} AS value FROM ${vTable} WHERE uid = $1 LIMIT 1`;
-      const res = await db.query(sql, [vUid]);
+      const res = await db.query("default", sql, [vUid]);
+      console.log("getUserField result:", res);
       return res?.rows?.[0]?.value ?? null;
     } catch (err) {
       ErrorHandler.capture?.(err, {
@@ -626,7 +631,7 @@ export default class Users {
         tableName,
         fieldKey,
       });
-      return null;
+      return { success: false, error: err.message || "UNKNOWN_ERROR" };
     }
   }
 
@@ -661,14 +666,28 @@ export default class Users {
           trim: true,
           lowercase: true,
         },
+        value: {
+          value,
+          type: "string",
+          required: true,
+          trim: true,
+          lowercase: true,
+        },
+      });
+      console.log("updateUserField", {
+        uid: vUid,
+        tableName: vTable,
+        fieldKey: vField,
+        value: value,
       });
 
       // For timestamps, caller can pass value or use DateTime to generate now.
       const res = await db.query(
+        "default",
         `UPDATE ${vTable} SET ${vField} = $1, updated_at = NOW() WHERE uid = $2`,
         [value, vUid]
       );
-
+      console.log("updateUserField result:", res);
       Logger.writeLog?.({
         flag: this.LOGGER_FLAG_USERS,
         action: "updateUserField",
@@ -684,7 +703,7 @@ export default class Users {
         tableName,
         fieldKey,
       });
-      return false;
+      return { success: false, error: err.message || "UNKNOWN_ERROR" };
     }
   }
 
@@ -703,13 +722,15 @@ export default class Users {
       const { uid: vUid } = this.validateInputs({
         uid: { value: uid, type: "string", required: true, trim: true },
       });
-      const cud = await this.getCriticalUserData(vUid);
-      if (!cud) return null;
+      // const cud = await this.getCriticalUserData(vUid);
+      // if (!cud) return null;
 
       const row = await db.query(
+        "default",
         "SELECT public_uid AS public_uid, role, is_new_user FROM users WHERE uid = $1 LIMIT 1",
         [vUid]
       );
+      console.log("buildUserData row:", row.rows);
       const base = row?.rows?.[0] || {};
 
       const out = {
@@ -741,9 +762,11 @@ export default class Users {
         uid: { value: uid, type: "string", required: true, trim: true },
       });
       const res = await db.query(
+        "default",
         "SELECT locale, notifications, call_video_message FROM user_settings WHERE uid = $1 LIMIT 1",
         [vUid]
       );
+      console.log("buildUserSettings row:", res.rows);
       const s = res?.rows?.[0] || {};
       return {
         localeConfig: s.locale ?? null,
@@ -769,10 +792,12 @@ export default class Users {
 
       const cud = await this.getCriticalUserData(vUid);
       const userRes = await db.query(
+        "default",
         "SELECT public_uid FROM users WHERE uid = $1 LIMIT 1",
         [vUid]
       );
       const profRes = await db.query(
+        "default",
         "SELECT bio, gender, age, body_type, hair_color, country, cover_image, background_images, social_urls, additional_urls FROM user_profiles WHERE uid = $1 LIMIT 1",
         [vUid]
       );

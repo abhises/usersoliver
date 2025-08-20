@@ -49,7 +49,8 @@ async function createTables() {
         background_images TEXT[],
         social_urls TEXT[],
         additional_urls TEXT[],
-        PRIMARY KEY (uid)
+        PRIMARY KEY (uid),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `;
 
