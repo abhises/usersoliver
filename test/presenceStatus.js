@@ -1,8 +1,7 @@
 import Users from "../service/Users.js";
 
 export default async function testPresenceStatus() {
-  const user = await Users.getCriticalUserData("u1");
-  console.log("User Presence Status:", user);
+  console.log(await Users.getOnlineStatus("u1"));
 
   //   Batch
   console.log("batch", await Users.getBatchOnlineStatus(["u1", "u2"]));

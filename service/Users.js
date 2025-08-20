@@ -69,7 +69,7 @@ export default class Users {
    * @param {string} displayName
    * @returns {string}
    */
-  initialsFromDisplayName(displayName) {
+  static initialsFromDisplayName(displayName) {
     const parts = (displayName ?? "")
       .trim()
       .split(/\s+/)
@@ -286,19 +286,19 @@ export default class Users {
    */
   static async getOnlineStatus(uid) {
     try {
-      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
-        uid,
+      const { uid: vUid } = validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
       });
 
       // 1) Check override
-      const override = await RedisClient.get(keyPresenceOverride(vUid));
-      if (override === PRESENCE_MODE.OFFLINE)
+      const override = await RedisClient.get(this.keyPresenceOverride(vUid));
+      if (override === this.PRESENCE_MODE.OFFLINE)
         return { online: false, status: "offline" };
-      if (override === PRESENCE_MODE.AWAY)
+      if (override === this.PRESENCE_MODE.AWAY)
         return { online: true, status: "away" };
 
       // 2) Check summary key
-      const summary = await RedisClient.get(keyPresenceSummary(vUid));
+      const summary = await RedisClient.get(this.keyPresenceSummary(vUid));
       const isOnline = !!summary;
       return { online: isOnline, status: isOnline ? "online" : "offline" };
     } catch (err) {
@@ -314,28 +314,28 @@ export default class Users {
    */
   static async getBatchOnlineStatus(uids = []) {
     try {
-      const { uids: vUids } = validateInputs({
-        uids: "required|array|min:1|max:500",
-        "uids.*": "required|string|trim",
+      const { uids: vUids } = this.validateInputs({
+        uids: { value: uids, type: "array", required: true, min: 1, max: 500 },
+        "uids.*": { value: uids, type: "string", required: true, trim: true },
       })({ uids });
 
       // overrides
-      const overrideKeys = vUids.map(keyPresenceOverride);
+      const overrideKeys = vUids.map(this.keyPresenceOverride);
       const overrides = await RedisClient.mget(...overrideKeys);
 
       // summaries
-      const summaryKeys = vUids.map(keyPresenceSummary);
+      const summaryKeys = vUids.map(this.keyPresenceSummary);
       const summaries = await RedisClient.mget(...summaryKeys);
 
       const out = [];
       for (let i = 0; i < vUids.length; i++) {
         const uid = vUids[i];
         const ov = overrides[i];
-        if (ov === PRESENCE_MODE.OFFLINE) {
+        if (ov === this.PRESENCE_MODE.OFFLINE) {
           out.push({ uid, online: false, status: "offline" });
           continue;
         }
-        if (ov === PRESENCE_MODE.AWAY) {
+        if (ov === this.PRESENCE_MODE.AWAY) {
           out.push({ uid, online: true, status: "away" });
           continue;
         }
@@ -366,32 +366,46 @@ export default class Users {
    */
   static async updatePresenceFromSocket(uid, connId) {
     try {
-      const { uid: vUid, connId: vConnId } = validateInputs({
-        uid: "required|string|trim",
-        connId: "required|string|trim",
-      })({ uid, connId });
+      const { uid: vUid, connId: vConnId } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
+        connId: { value: connId, type: "string", required: true, trim: true },
+      });
 
       // Refresh presence summary TTL
-      await RedisClient.set(keyPresenceSummary(vUid), "1", {
-        expiry: REDIS_TIMING_SECONDS.PRESENCE_TTL,
-      });
+      // await RedisClient.set(keyPresenceSummary(vUid), "1", {
+      //   expiry: REDIS_TIMING_SECONDS.PRESENCE_TTL,
+      // });
 
       // OPTIONAL: Throttle durable lastActivityAt write in Postgres (e.g., once per 60s)
       // Reads are Redis-only; this is purely for analytics/labels.
-      await db.query(
+      const update = await db.query(
+        "default",
         "UPDATE users SET last_activity_at = NOW() WHERE uid = $1 AND (last_activity_at IS NULL OR NOW() - last_activity_at > INTERVAL '60 seconds')",
         [vUid]
       );
+      // const result = await db.query(
+      //   "default",
+      //   `
+      //   UPDATE users
+      //   SET last_activity_at = NOW()
+      //   WHERE uid = $1
+      //     AND (last_activity_at IS NULL OR NOW() - last_activity_at > INTERVAL '60 seconds')
+      //   RETURNING *
+      //   `,
+      //   [vUid]
+      // );
+      console.log("Update result:", update);
+      return update;
 
       // Bust CUD so next read merges fresh presence if needed
-      await RedisClient.del(keyCriticalUserData(vUid));
+      // await RedisClient.del(keyCriticalUserData(vUid));
 
-      Logger.writeLog?.({
-        flag: LOGGER_FLAG_USERS,
-        action: "updatePresenceFromSocket",
-        message: "Presence heartbeat processed",
-        data: { uid: vUid, connId: vConnId },
-      });
+      // Logger.writeLog?.({
+      //   flag: this.LOGGER_FLAG_USERS,
+      //   action: "updatePresenceFromSocket",
+      //   message: "Presence heartbeat processed",
+      //   data: { uid: vUid, connId: vConnId },
+      // });
     } catch (err) {
       ErrorHandler.capture?.(err, {
         where: "Users.updatePresenceFromSocket",
@@ -409,26 +423,28 @@ export default class Users {
    */
   static async setPresenceOverride(uid, mode) {
     try {
-      const { uid: vUid, mode: vMode } = validateInputs({
-        uid: "required|string|trim",
-        mode: `required|string|in:${Object.values(PRESENCE_MODE).join(",")}`,
-      })({ uid, mode });
+      const { uid: vUid, mode: vMode } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
+        mode: { value: mode, type: "string", required: true, trim: true },
+      });
 
-      await RedisClient.set(keyPresenceOverride(vUid), vMode); // no TTL
-      await RedisClient.del(keyCriticalUserData(vUid)); // bust CUD
+      console.log("setPresenceOverride", { uid: vUid, mode: vMode });
+      // await RedisClient.set(this.keyPresenceOverride(vUid), vMode); // no TTL
+      // await RedisClient.del(this.keyCriticalUserData(vUid)); // bust CUD
 
       // Persist preference for rebuild only
-      await db.query(
-        "UPDATE user_settings SET presence_preference = $1, updated_at = NOW() WHERE uid = $2",
+      const result = await db.query(
+        "default",
+        "UPDATE user_settings SET presence_preference = $1, updated_at = NOW() WHERE uid = $2 RETURNING *",
         [vMode, vUid]
       );
-
-      Logger.writeLog?.({
-        flag: LOGGER_FLAG_USERS,
-        action: "setPresenceOverride",
-        message: "Presence override updated",
-        data: { uid: vUid, mode: vMode },
-      });
+      console.log("result", result.rows);
+      // Logger.writeLog?.({
+      //   flag: this.LOGGER_FLAG_USERS,
+      //   action: "setPresenceOverride",
+      //   message: "Presence override updated",
+      //   data: { uid: vUid, mode: vMode },
+      // });
 
       return true;
     } catch (err) {
@@ -437,7 +453,7 @@ export default class Users {
         uid,
         mode,
       });
-      return false;
+      return { success: false, error: err.message };
     }
   }
 
@@ -452,13 +468,18 @@ export default class Users {
    */
   static async isUsernameTaken(username) {
     try {
-      const { username: vUsername } = validateInputs({
-        username: "required|string|trim|lowercase",
-      })({ username });
+      const { username: vUsername } = this.validateInputs({
+        username: {
+          value: username,
+          type: "string",
+          required: true,
+          trim: true,
+        },
+      });
 
-      if (!isUsernameFormatValid(vUsername)) return true; // invalid format treated as not available
+      if (!this.isUsernameFormatValid(vUsername)) return true; // invalid format treated as not available
 
-      const ownerUid = await RedisClient.get(keyUsernameToUid(vUsername));
+      const ownerUid = await RedisClient.get(this.keyUsernameToUid(vUsername));
       return !!ownerUid;
     } catch (err) {
       ErrorHandler.capture?.(err, { where: "Users.isUsernameTaken", username });
@@ -577,11 +598,21 @@ export default class Users {
         uid: vUid,
         tableName: vTable,
         fieldKey: vField,
-      } = validateInputs({
-        uid: "required|string|trim",
-        tableName: "required|string|trim|lowercase",
-        fieldKey: "required|string|trim|lowercase",
-      })({ uid, tableName, fieldKey });
+      } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
+        tableName: {
+          value: tableName,
+          type: "string",
+          required: true,
+          trim: true,
+        },
+        fieldKey: {
+          value: fieldKey,
+          type: "string",
+          required: true,
+          trim: true,
+        },
+      });
 
       // Securely whitelist table and field names if you maintain an allowlist.
       // For now, parameterize value and use dynamic identifiers cautiously.
@@ -614,11 +645,23 @@ export default class Users {
         uid: vUid,
         tableName: vTable,
         fieldKey: vField,
-      } = validateInputs({
-        uid: "required|string|trim",
-        tableName: "required|string|trim|lowercase",
-        fieldKey: "required|string|trim|lowercase",
-      })({ uid, tableName, fieldKey });
+      } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
+        tableName: {
+          value: tableName,
+          type: "string",
+          required: true,
+          trim: true,
+          lowercase: true,
+        },
+        fieldKey: {
+          value: fieldKey,
+          type: "string",
+          required: true,
+          trim: true,
+          lowercase: true,
+        },
+      });
 
       // For timestamps, caller can pass value or use DateTime to generate now.
       const res = await db.query(
@@ -627,7 +670,7 @@ export default class Users {
       );
 
       Logger.writeLog?.({
-        flag: LOGGER_FLAG_USERS,
+        flag: this.LOGGER_FLAG_USERS,
         action: "updateUserField",
         message: "Durable field updated",
         data: { uid: vUid, tableName: vTable, fieldKey: vField },
@@ -657,8 +700,8 @@ export default class Users {
    */
   static async buildUserData(uid) {
     try {
-      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
-        uid,
+      const { uid: vUid } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
       });
       const cud = await this.getCriticalUserData(vUid);
       if (!cud) return null;
@@ -674,7 +717,7 @@ export default class Users {
         userName: cud.username || "",
         publicUid: base.public_uid || "",
         avatar: cud.avatar || "",
-        initials: initialsFromDisplayName(cud.displayName || ""),
+        initials: this.initialsFromDisplayName(cud.displayName || ""),
         role: base.role || "user",
         isNewUser: !!base.is_new_user,
       };
@@ -694,8 +737,8 @@ export default class Users {
    */
   static async buildUserSettings(uid) {
     try {
-      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
-        uid,
+      const { uid: vUid } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
       });
       const res = await db.query(
         "SELECT locale, notifications, call_video_message FROM user_settings WHERE uid = $1 LIMIT 1",
@@ -720,8 +763,8 @@ export default class Users {
    */
   static async buildUserProfile(uid) {
     try {
-      const { uid: vUid } = validateInputs({ uid: "required|string|trim" })({
-        uid,
+      const { uid: vUid } = this.validateInputs({
+        uid: { value: uid, type: "string", required: true, trim: true },
       });
 
       const cud = await this.getCriticalUserData(vUid);
