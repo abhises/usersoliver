@@ -6,4 +6,6 @@ import SafeUtils from "./SafeUtils.js";
 import RedisClient from "./Redis.js";
 import DB from "./DB.js";
 
-export { ErrorHandler, Logger, DB, DateTime, SafeUtils, RedisClient };
+const db = new DB();
+
+export { ErrorHandler, Logger, db, DateTime, SafeUtils, RedisClient };

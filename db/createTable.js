@@ -1,5 +1,5 @@
 import "dotenv/config";
-import DB from "./utils/DB.js"; // adjust path if needed
+import DB from "../utils/DB.js"; // adjust path if needed
 
 const db = new DB();
 
@@ -17,7 +17,8 @@ async function createTables() {
         public_uid UUID DEFAULT gen_random_uuid(),
         role VARCHAR(50) DEFAULT 'user',
         is_new_user BOOLEAN DEFAULT true,
-        last_activity_at TIMESTAMP
+        last_activity_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `;
 

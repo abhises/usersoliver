@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "createTable": "node createTable.js",
+    "createTable": "node db/createTable.js",
+    "dropTables": "node db/dropTables.js",
     "seed": "node db/seedUser.js",
     "deleteUser": "node db/deleteUser.js",
     "test:manual": "node test/index.js"
