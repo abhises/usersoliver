@@ -70,6 +70,18 @@ LOGGING_CONSOLE_ENABLED=1
 
 ---
 
+## scripts
+
+    | Command               | Description                                                      |
+
+| --------------------- | ---------------------------------------------------------------- |
+| `npm run createTable` | Creates the database tables |
+| `npm run dropTables` | Drops all existing tables |
+| `npm run seed` | Seeds the database with sample user data |
+| `npm run deleteUser` | Deletes a user (script implementation inside `db/deleteUser.js`) |
+| `npm run test` | Runs Jest tests |
+| `npm run test:manual` | Runs manual test script (`test/index.js`) |
+
 ## 🧪 Running Tests
 
 All test scripts are in the `test/` folder. Example test functions include:
