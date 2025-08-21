@@ -13,7 +13,7 @@ export default async function setUserNameTest() {
   // Redis uid:to:username:u100 = alice_123
 
   // Should fail (already taken)
-  const res2 = await Users.setUsername("u1", "abhises");
+  const res2 = await Users.setUsername("u1", "nepali");
   console.log(res2); // { success: false, previous: null }
 
   const res3 = await Users.setUsername("u3", "alice422");

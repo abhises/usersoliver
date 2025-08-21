@@ -536,7 +536,7 @@ export default class Users {
 
       // Atomic claim: if key exists and not owned by uid -> conflict
       const existingOwner = await RedisClient.get(mapKey);
-      // console.log("Setting username: existingOwner", existingOwner);
+      console.log("Setting username: existingOwner", existingOwner);
       if (existingOwner && existingOwner !== vUid) {
         throw new Error("USERNAME_TAKEN");
       }
