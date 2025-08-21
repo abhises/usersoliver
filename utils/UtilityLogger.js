@@ -61,7 +61,7 @@ class Logger {
     };
 
     if (Logger.isConsoleEnabled()) {
-      console.log(`[Logger flag=${flag}]`, JSON.stringify(logEntry, null, 2));
+      // console.log(`[Logger flag=${flag}]`, JSON.stringify(logEntry, null, 2));
     }
 
     const logPath = Logger.resolvePath(route.path, data);
@@ -185,11 +185,11 @@ class Logger {
 
       await client.send(command);
     } catch (err) {
-      console.error(`[Logger] Failed to write log to S3: ${err.message}`);
+      // console.error(`[Logger] Failed to write log to S3: ${err.message}`);
     }
   }
   static notifySlack(logEntry) {
-    console.log(`[Logger] 🔔 Critical log posted to Slack:`, logEntry);
+    // console.log(`[Logger] 🔔 Critical log posted to Slack:`, logEntry);
   }
 }
 

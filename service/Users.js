@@ -82,21 +82,26 @@ export default class Users {
    * Build Redis keys
    */
   static keyCriticalUserData(uid) {
-    return `${this.REDIS_KEY_PREFIX.CRITICAL_USER_DATA}${uid}`;
+    return `${Users.REDIS_KEY_PREFIX.CRITICAL_USER_DATA}${uid}`;
   }
   static keyPresenceSummary(uid) {
-    return `${this.REDIS_KEY_PREFIX.PRESENCE_SUMMARY_USER}${uid}`;
+    return `${Users.REDIS_KEY_PREFIX.PRESENCE_SUMMARY_USER}${uid}`;
   }
   static keyPresenceOverride(uid) {
-    return `${this.REDIS_KEY_PREFIX.PRESENCE_OVERRIDE_USER}${uid}`;
+    // console.log("Building keyPresenceOverride for UID:", uid);
+    // console.log(
+    //   "this.REDIS_KEY_PREFIX keys:",
+    //   `${Users.REDIS_KEY_PREFIX.PRESENCE_OVERRIDE_USER}${uid}`
+    // );
+    return `${Users.REDIS_KEY_PREFIX.PRESENCE_OVERRIDE_USER}${uid}`;
   }
   static keyUsernameToUid(name) {
-    return `${this.REDIS_KEY_PREFIX.USERNAME_TO_UID}${this.normalizeUsername(
+    return `${Users.REDIS_KEY_PREFIX.USERNAME_TO_UID}${Users.normalizeUsername(
       name
     )}`;
   }
   static keyUidToUsername(uid) {
-    return `${this.REDIS_KEY_PREFIX.UID_TO_USERNAME}${uid}`;
+    return `${Users.REDIS_KEY_PREFIX.UID_TO_USERNAME}${uid}`;
   }
   /**
    * Read JSON value from Redis (string→object).
@@ -154,26 +159,26 @@ export default class Users {
       // console.log("uid inside the get critical ", vUid);
       // 1) Try Redis CUD
       const cudKey = this.keyCriticalUserData(vUid);
-      console.log("cudKey", cudKey);
+      // console.log("cudKey", cudKey);
 
-      // let cud = await this.redisGetJson(cudKey);
+      let cud = await this.redisGetJson(cudKey);
 
       // console.log(cud);
 
       // 2) Merge presence (override→summary) from Redis every read
-      // const presence = await this.getOnlineStatus(vUid);
+      const presence = await this.getOnlineStatus(vUid);
 
-      // if (cud) {
-      //   const merged = {
-      //     ...cud,
-      //     online: presence.online,
-      //     status: presence.status,
-      //   };
-      //   return merged;
-      // }
+      if (cud) {
+        const merged = {
+          ...cud,
+          online: presence.online,
+          status: presence.status,
+        };
+        return merged;
+      }
 
       // 3) Hydrate from Postgres (durables) — minimal SELECT to get username/displayName/avatar
-      console.log("cudKey", cudKey);
+      // console.log("cudKey", cudKey);
 
       const userRow = await db.query(
         "default", // connection name
@@ -182,24 +187,24 @@ export default class Users {
       );
       // console.log("userRow", userRow);
       const record = userRow?.rows?.[0];
-      console.log("record", record);
+      // console.log("record", record);
       if (!record) return null;
 
       const hydrated = {
         username: record.username || "",
         displayName: record.display_name || "",
         avatar: record.avatar || "",
-        // online: presence.online,
-        // status: presence.status,
+        online: presence.online,
+        status: presence.status,
       };
-      console.log("hydrated user", hydrated);
+      // console.log("hydrated user", hydrated);
 
       // 4) Warm Redis CUD
-      // await redisSetJson(
-      //   cudKey,
-      //   hydrated,
-      //   REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
-      // );
+      await redisSetJson(
+        cudKey,
+        hydrated,
+        this.REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
+      );
 
       Logger.writeLog?.({
         flag: this.LOGGER_FLAG_USERS,
@@ -211,7 +216,11 @@ export default class Users {
       return hydrated;
     } catch (err) {
       ErrorHandler.capture?.(err, { where: "Users.getCriticalUserData", uid });
-      return null;
+      return {
+        status: false,
+        data: null,
+        error: err.message || "UNKNOWN_ERROR",
+      };
     }
   }
 
@@ -223,11 +232,12 @@ export default class Users {
   static async getCriticalUsersData(uids = []) {
     try {
       const { uids: vUids } = this.validateInputs({
-        uid: { value: uids, type: "array", required: true, min: 1, max: 200 },
-      })({ uids });
+        uids: { value: uids, type: "array", required: true, min: 1, max: 200 },
+      });
+      // console.log("Validated UIDs:", vUids);
 
       // 1) MGET CUD keys
-      const keys = vUids.map(keyCriticalUserData);
+      const keys = vUids.map(this.keyCriticalUserData);
       const rawValues = await RedisClient.mget(...keys);
       const results = [];
       const misses = [];
@@ -316,13 +326,15 @@ export default class Users {
     try {
       const { uids: vUids } = this.validateInputs({
         uids: { value: uids, type: "array", required: true, min: 1, max: 500 },
-        "uids.*": { value: uids, type: "string", required: true, trim: true },
-      })({ uids });
+      });
+
+      // console.log("Validated UIDs:", vUids);
 
       // overrides
       const overrideKeys = vUids.map(this.keyPresenceOverride);
+      // console.log("Override keys:", overrideKeys);
       const overrides = await RedisClient.mget(...overrideKeys);
-
+      // console.log("Overrides:", overrides);
       // summaries
       const summaryKeys = vUids.map(this.keyPresenceSummary);
       const summaries = await RedisClient.mget(...summaryKeys);
@@ -353,7 +365,7 @@ export default class Users {
         where: "Users.getBatchOnlineStatus",
         uids,
       });
-      return [];
+      return { success: false, data: [], error: err.message };
     }
   }
 
@@ -372,15 +384,15 @@ export default class Users {
       });
 
       // Refresh presence summary TTL
-      // await RedisClient.set(keyPresenceSummary(vUid), "1", {
-      //   expiry: REDIS_TIMING_SECONDS.PRESENCE_TTL,
-      // });
+      await RedisClient.set(this.keyPresenceSummary(vUid), "1", {
+        expiry: this.REDIS_TIMING_SECONDS.PRESENCE_TTL,
+      });
 
       // OPTIONAL: Throttle durable lastActivityAt write in Postgres (e.g., once per 60s)
       // Reads are Redis-only; this is purely for analytics/labels.
       const update = await db.query(
         "default",
-        "UPDATE users SET last_activity_at = NOW() WHERE uid = $1 AND (last_activity_at IS NULL OR NOW() - last_activity_at > INTERVAL '60 seconds')",
+        "UPDATE users SET last_activity_at = NOW() WHERE uid = $1 AND (last_activity_at IS NULL OR NOW() - last_activity_at > INTERVAL '60 seconds ')",
         [vUid]
       );
       // const result = await db.query(
@@ -395,23 +407,23 @@ export default class Users {
       //   [vUid]
       // );
       console.log("Update result:", update);
-      return update;
 
       // Bust CUD so next read merges fresh presence if needed
-      // await RedisClient.del(keyCriticalUserData(vUid));
-
-      // Logger.writeLog?.({
-      //   flag: this.LOGGER_FLAG_USERS,
-      //   action: "updatePresenceFromSocket",
-      //   message: "Presence heartbeat processed",
-      //   data: { uid: vUid, connId: vConnId },
-      // });
+      await RedisClient.del(this.keyCriticalUserData(vUid));
+      Logger.writeLog?.({
+        flag: this.LOGGER_FLAG_USERS,
+        action: "updatePresenceFromSocket",
+        message: "Presence heartbeat processed",
+        data: { uid: vUid, connId: vConnId },
+      });
+      return update;
     } catch (err) {
       ErrorHandler.capture?.(err, {
         where: "Users.updatePresenceFromSocket",
         uid,
         connId,
       });
+      return { success: false, error: err.message || "UNKNOWN_ERROR" };
     }
   }
 
@@ -428,9 +440,9 @@ export default class Users {
         mode: { value: mode, type: "string", required: true, trim: true },
       });
 
-      console.log("setPresenceOverride", { uid: vUid, mode: vMode });
-      // await RedisClient.set(this.keyPresenceOverride(vUid), vMode); // no TTL
-      // await RedisClient.del(this.keyCriticalUserData(vUid)); // bust CUD
+      // console.log("setPresenceOverride", { uid: vUid, mode: vMode });
+      await RedisClient.set(this.keyPresenceOverride(vUid), vMode); // no TTL
+      await RedisClient.del(this.keyCriticalUserData(vUid)); // bust CUD
 
       // Persist preference for rebuild only
       const result = await db.query(
@@ -438,15 +450,18 @@ export default class Users {
         "UPDATE user_settings SET presence_preference = $1, updated_at = NOW() WHERE uid = $2 RETURNING *",
         [vMode, vUid]
       );
-      console.log("result", result.rows);
-      // Logger.writeLog?.({
-      //   flag: this.LOGGER_FLAG_USERS,
-      //   action: "setPresenceOverride",
-      //   message: "Presence override updated",
-      //   data: { uid: vUid, mode: vMode },
-      // });
+      if (!result?.rows[0]) {
+        throw new Error("PERSISTENCE_FAILED");
+      }
+      // console.log("result", result.rows);
+      Logger.writeLog?.({
+        flag: this.LOGGER_FLAG_USERS,
+        action: "setPresenceOverride",
+        message: "Presence override updated",
+        data: { uid: vUid, mode: vMode },
+      });
 
-      return true;
+      return result?.rows[0];
     } catch (err) {
       ErrorHandler.capture?.(err, {
         where: "Users.setPresenceOverride",
@@ -478,7 +493,7 @@ export default class Users {
       });
 
       if (!this.isUsernameFormatValid(vUsername)) return true; // invalid format treated as not available
-
+      console.log("hi");
       const ownerUid = await RedisClient.get(this.keyUsernameToUid(vUsername));
       return !!ownerUid;
     } catch (err) {
@@ -511,27 +526,27 @@ export default class Users {
       console.log("Setting username: lower", vUid, vUsernameRaw);
 
       const vUsername = this.normalizeUsername(vUsernameRaw);
-      // if (!this.isUsernameFormatValid(vUsername)) {
-      //   throw new Error("INVALID_USERNAME_FORMAT");
-      // }
-      // // console.log("Setting username: normalized");
+      if (!this.isUsernameFormatValid(vUsername)) {
+        throw new Error("INVALID_USERNAME_FORMAT");
+      }
+      // console.log("Setting username: normalized");
 
-      // const mapKey = this.keyUsernameToUid(vUsername);
-      // console.log("Setting username: mapKey", mapKey);
+      const mapKey = this.keyUsernameToUid(vUsername);
+      console.log("Setting username: mapKey", mapKey);
 
       // Atomic claim: if key exists and not owned by uid -> conflict
-      // const existingOwner = await RedisClient.get(mapKey);
-      // // console.log("Setting username: existingOwner", existingOwner);
-      // if (existingOwner && existingOwner !== vUid) {
-      //   throw new Error("USERNAME_TAKEN");
-      // }
+      const existingOwner = await RedisClient.get(mapKey);
+      // console.log("Setting username: existingOwner", existingOwner);
+      if (existingOwner && existingOwner !== vUid) {
+        throw new Error("USERNAME_TAKEN");
+      }
 
-      // // Fetch previous username (if any) from mirror
-      // const oldUsername = await RedisClient.get(this.keyUidToUsername(vUid));
+      // Fetch previous username (if any) from mirror
+      const oldUsername = await RedisClient.get(this.keyUidToUsername(vUid));
 
-      // // Set mappings
-      // await RedisClient.set(mapKey, vUid);
-      // await RedisClient.set(keyUidToUsername(vUid), vUsername);
+      // Set mappings
+      await RedisClient.set(mapKey, vUid);
+      await RedisClient.set(this.keyUidToUsername(vUid), vUsername);
 
       // Update durable copy
 
@@ -543,16 +558,16 @@ export default class Users {
       console.log("Updated rows:", rows.rows);
 
       // Update CUD cache if exists
-      // const cudKey = this.keyCriticalUserData(vUid);
-      // const cud = await this.redisGetJson(cudKey);
-      // if (cud) {
-      //   cud.username = vUsername;
-      //   await this.redisSetJson(
-      //     cudKey,
-      //     cud,
-      //     REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
-      //   );
-      // }
+      const cudKey = this.keyCriticalUserData(vUid);
+      const cud = await this.redisGetJson(cudKey);
+      if (cud) {
+        cud.username = vUsername;
+        await this.redisSetJson(
+          cudKey,
+          cud,
+          this.REDIS_TIMING_SECONDS.CRITICAL_USER_DATA_TTL
+        );
+      }
 
       Logger.writeLog?.({
         flag: this.LOGGER_FLAG_USERS,
@@ -562,13 +577,13 @@ export default class Users {
       });
 
       // If username changed, optionally free old map entry
-      // if (oldUsername && oldUsername !== vUsername) {
-      //   const oldMapKey = keyUsernameToUid(oldUsername);
-      //   const currOwner = await RedisClient.get(oldMapKey);
-      //   if (currOwner === vUid) {
-      //     await RedisClient.del(oldMapKey);
-      //   }
-      // }
+      if (oldUsername && oldUsername !== vUsername) {
+        const oldMapKey = this.keyUsernameToUid(oldUsername);
+        const currOwner = await RedisClient.get(oldMapKey);
+        if (currOwner === vUid) {
+          await RedisClient.del(oldMapKey);
+        }
+      }
 
       return { success: true, previous: oldUsername || undefined };
     } catch (err) {
@@ -613,17 +628,20 @@ export default class Users {
           trim: true,
         },
       });
-      console.log("getUserField", {
-        uid: vUid,
-        tableName: vTable,
-        fieldKey: vField,
-      });
+      // console.log("getUserField", {
+      //   uid: vUid,
+      //   tableName: vTable,
+      //   fieldKey: vField,
+      // });
       // Securely whitelist table and field names if you maintain an allowlist.
       // For now, parameterize value and use dynamic identifiers cautiously.
       const sql = `SELECT ${vField} AS value FROM ${vTable} WHERE uid = $1 LIMIT 1`;
       const res = await db.query("default", sql, [vUid]);
-      console.log("getUserField result:", res);
-      return res?.rows?.[0]?.value ?? null;
+      // console.log("getUserField result:", res);
+      if (!res?.rows?.[0]) {
+        throw new Error("GetUserField_FAILED");
+      }
+      return res?.rows?.[0];
     } catch (err) {
       ErrorHandler.capture?.(err, {
         where: "Users.getUserField",
@@ -674,12 +692,12 @@ export default class Users {
           lowercase: true,
         },
       });
-      console.log("updateUserField", {
-        uid: vUid,
-        tableName: vTable,
-        fieldKey: vField,
-        value: value,
-      });
+      // console.log("updateUserField", {
+      //   uid: vUid,
+      //   tableName: vTable,
+      //   fieldKey: vField,
+      //   value: value,
+      // });
 
       // For timestamps, caller can pass value or use DateTime to generate now.
       const res = await db.query(
@@ -687,15 +705,18 @@ export default class Users {
         `UPDATE ${vTable} SET ${vField} = $1, updated_at = NOW() WHERE uid = $2`,
         [value, vUid]
       );
-      console.log("updateUserField result:", res);
+      // console.log("updateUserField result:", res);
       Logger.writeLog?.({
         flag: this.LOGGER_FLAG_USERS,
         action: "updateUserField",
         message: "Durable field updated",
         data: { uid: vUid, tableName: vTable, fieldKey: vField },
       });
+      if (res.rowCount === 0) {
+        throw new Error("UpdateUserField_FAILED:user not found");
+      }
 
-      return (res?.rowCount ?? 0) > 0;
+      return { success: true };
     } catch (err) {
       ErrorHandler.capture?.(err, {
         where: "Users.updateUserField",
@@ -722,15 +743,15 @@ export default class Users {
       const { uid: vUid } = this.validateInputs({
         uid: { value: uid, type: "string", required: true, trim: true },
       });
-      // const cud = await this.getCriticalUserData(vUid);
-      // if (!cud) return null;
+      const cud = await this.getCriticalUserData(vUid);
+      if (!cud) return null;
 
       const row = await db.query(
         "default",
         "SELECT public_uid AS public_uid, role, is_new_user FROM users WHERE uid = $1 LIMIT 1",
         [vUid]
       );
-      console.log("buildUserData row:", row.rows);
+      // console.log("buildUserData row:", row.rows);
       const base = row?.rows?.[0] || {};
 
       const out = {
@@ -766,7 +787,7 @@ export default class Users {
         "SELECT locale, notifications, call_video_message FROM user_settings WHERE uid = $1 LIMIT 1",
         [vUid]
       );
-      console.log("buildUserSettings row:", res.rows);
+      // console.log("buildUserSettings row:", res.rows);
       const s = res?.rows?.[0] || {};
       return {
         localeConfig: s.locale ?? null,

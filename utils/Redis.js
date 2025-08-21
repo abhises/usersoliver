@@ -4,7 +4,8 @@
  */
 
 import redis from "redis";
-import { ErrorHandler, Logger } from "../utils/index.js";
+import Logger from "./UtilityLogger.js";
+import ErrorHandler from "./ErrorHandler.js";
 
 // Cached environment variables
 let cachedEnvironment = null;
@@ -63,7 +64,7 @@ async function RedisHttpProxy(redisCommand) {
   try {
     const lambdaUrl = getLambdaUrl();
     if (!lambdaUrl) {
-      throw ErrorHandler.networkError(
+      throw ErrorHandler.add_error(
         "LAMBDA_URL not configured for development environment",
         null,
         { redisCommand }
@@ -71,7 +72,7 @@ async function RedisHttpProxy(redisCommand) {
     }
 
     const url = `${lambdaUrl}redis`;
-    Logger.debug("Making Redis proxy request", { url, redisCommand });
+    Logger.writeLog("Making Redis proxy request", { url, redisCommand });
 
     const response = await fetch(url, {
       method: "POST",
@@ -82,7 +83,7 @@ async function RedisHttpProxy(redisCommand) {
     });
 
     if (!response.ok) {
-      throw ErrorHandler.networkError(
+      throw ErrorHandler.add_error(
         `HTTP ${response.status}: ${response.statusText}`,
         null,
         {
@@ -94,13 +95,13 @@ async function RedisHttpProxy(redisCommand) {
     }
 
     const data = await response.json();
-    Logger.debug("Redis proxy request successful", {
+    Logger.writeLog("Redis proxy request successful", {
       redisCommand,
       responseStatus: response.status,
     });
     return data;
   } catch (error) {
-    Logger.error("Redis proxy request failed", error, { redisCommand });
+    Logger.writeLog("Redis proxy request failed", error, { redisCommand });
     throw error;
   }
 }
@@ -114,16 +115,16 @@ class RedisClass {
   /**
    * Initialize Redis class
    */
-  static async initialize() {
-    try {
-      await Logger.initialize();
-      Logger.info("Redis class initialized");
-      return true;
-    } catch (error) {
-      console.error("Failed to initialize Redis class:", error);
-      return false;
-    }
-  }
+  // static async initialize() {
+  //   try {
+  //     await Logger.initialize();
+  //     Logger.writeLog("Redis class initialized");
+  //     return true;
+  //   } catch (error) {
+  //     Logger.writeLog("Failed to initialize Redis class:", error);
+  //     return false;
+  //   }
+  // }
 
   /**
    * Get current environment
@@ -158,7 +159,7 @@ class RedisClass {
   static async connect(options = {}) {
     try {
       const env = getEnvironment().app;
-      Logger.info("Attempting to connect to Redis", {
+      Logger.writeLog("Attempting to connect to Redis", {
         environment: env,
         database: RedisClass.getDatabase(),
       });
@@ -189,17 +190,17 @@ class RedisClass {
 
         // Set up event listeners
         staticClient.on("connect", () => {
-          Logger.success("Redis connected successfully");
+          Logger.writeLog("Redis connected successfully");
           isConnected = true;
         });
 
         staticClient.on("error", (err) => {
-          Logger.error("Redis connection error", err);
+          Logger.writeLog("Redis connection error", err);
           isConnected = false;
         });
 
         staticClient.on("end", () => {
-          Logger.warn("Redis connection ended");
+          Logger.writeLog("Redis connection ended");
           isConnected = false;
         });
 
@@ -208,18 +209,20 @@ class RedisClass {
 
         // Select database
         await staticClient.select(RedisClass.getDatabase());
-        Logger.info(`Redis connected to database ${RedisClass.getDatabase()}`);
+        Logger.writeLog(
+          `Redis connected to database ${RedisClass.getDatabase()}`
+        );
       } else {
         // For development, just test the connection
-        Logger.info("Redis development mode - using proxy");
+        Logger.writeLog("Redis development mode - using proxy");
         isConnected = true;
       }
 
       return true;
     } catch (error) {
-      Logger.error("Failed to connect to Redis", error);
+      Logger.writeLog("Failed to connect to Redis", error);
       isConnected = false;
-      throw ErrorHandler.databaseError("Failed to connect to Redis", error);
+      throw ErrorHandler.add_error("Failed to connect to Redis", error);
     }
   }
 
@@ -237,15 +240,12 @@ class RedisClass {
         await staticClient.quit();
       }
       isConnected = false;
-      Logger.success("Redis disconnected successfully");
+      Logger.writeLog("Redis disconnected successfully");
       return true;
     } catch (error) {
-      Logger.error("Failed to disconnect from Redis", error);
+      Logger.writeLog("Failed to disconnect from Redis", error);
       isConnected = false;
-      throw ErrorHandler.databaseError(
-        "Failed to disconnect from Redis",
-        error
-      );
+      throw ErrorHandler.add_error("Failed to disconnect from Redis", error);
     }
   }
 
@@ -260,16 +260,16 @@ class RedisClass {
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         return await staticClient.ping();
       } else {
-        Logger.debug("Redis PING via proxy");
+        Logger.writeLog("Redis PING via proxy");
         const command = addEnvCommandPrefix("ping()");
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error("Redis ping failed", error);
+      Logger.writeLog("Redis ping failed", error);
       throw error;
     }
   }
@@ -288,7 +288,7 @@ class RedisClass {
         stringValue = JSON.stringify(value);
       }
 
-      Logger.debug("Setting Redis key", {
+      Logger.writeLog("Setting Redis key", {
         key,
         valueType: typeof value,
         hasExpiry: !!options.expiry,
@@ -299,25 +299,25 @@ class RedisClass {
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
-
+        console.log("Setting Redis key", { key, value: stringValue });
         if (options.expiry) {
           return await staticClient.setEx(key, options.expiry, stringValue);
         } else {
           return await staticClient.set(key, stringValue);
         }
       } else {
-        Logger.debug("Redis SET via proxy", { key, value: stringValue });
+        // Logger.debug("Redis SET via proxy", { key, value: stringValue });
         const command = addEnvCommandPrefix(`set(#${key}, '${stringValue}')`);
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error(`Failed to set key ${key}`, error, {
+      Logger.writeLog(`Failed to set key ${key}`, error, {
         key,
         valueType: typeof value,
       });
-      throw ErrorHandler.databaseError(`Failed to set key ${key}`, error, {
+      throw ErrorHandler.add_error(`Failed to set key ${key}`, error, {
         key,
       });
     }
@@ -330,14 +330,14 @@ class RedisClass {
    */
   static async get(key) {
     try {
-      Logger.debug("Getting Redis key", { key });
+      Logger.writeLog("Getting Redis key", { key });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
 
         const result = await staticClient.get(key);
@@ -353,7 +353,7 @@ class RedisClass {
 
         return result;
       } else {
-        Logger.debug("Redis GET via proxy", { key });
+        Logger.writeLog("Redis GET via proxy", { key });
         const command = addEnvCommandPrefix(`get(#${key})`);
         const result = await RedisHttpProxy(command);
 
@@ -382,8 +382,8 @@ class RedisClass {
         return result;
       }
     } catch (error) {
-      Logger.error(`Failed to get key ${key}`, error, { key });
-      throw ErrorHandler.databaseError(`Failed to get key ${key}`, error, {
+      Logger.writeLog(`Failed to get key ${key}`, error, { key });
+      throw ErrorHandler.add_error(`Failed to get key ${key}`, error, {
         key,
       });
     }
@@ -396,14 +396,14 @@ class RedisClass {
    */
   static async mget(...keys) {
     try {
-      Logger.debug("Getting multiple Redis keys", { keys });
+      Logger.writeLog("Getting multiple Redis keys", { keys });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
 
         const results = await staticClient.mGet(...keys);
@@ -420,14 +420,15 @@ class RedisClass {
           return result;
         });
       } else {
-        Logger.debug("Redis MGET via proxy", { keys });
+        Logger.writeLog("Redis MGET via proxy", { keys });
         const keyArgs = keys.map((key) => `#${key}`).join(", ");
         const command = addEnvCommandPrefix(`mget(${keyArgs})`);
         const results = await RedisHttpProxy(command);
+        // console.log("results:", results);
 
         // Handle different response types from proxy
         if (!Array.isArray(results)) {
-          Logger.warn("MGET returned non-array result", {
+          Logger.writeLog("MGET returned non-array result", {
             results,
             expectedKeys: keys,
           });
@@ -461,8 +462,9 @@ class RedisClass {
         });
       }
     } catch (error) {
-      Logger.error("Failed to get multiple keys", error, { keys });
-      throw ErrorHandler.databaseError("Failed to get multiple keys", error, {
+      // console.log("error", error);
+      Logger.writeLog("Failed to get multiple keys", error, { keys });
+      throw ErrorHandler.add_error("Failed to get multiple keys", error, {
         keys,
       });
     }
@@ -475,7 +477,7 @@ class RedisClass {
    */
   static async mset(keyValuePairs) {
     try {
-      Logger.debug("Setting multiple Redis keys", {
+      Logger.writeLog("Setting multiple Redis keys", {
         keyCount: Object.keys(keyValuePairs).length,
       });
 
@@ -484,7 +486,7 @@ class RedisClass {
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
 
         // Convert object values to strings
@@ -496,7 +498,7 @@ class RedisClass {
 
         return await staticClient.mSet(stringPairs);
       } else {
-        Logger.debug("Redis MSET via proxy", {
+        Logger.writeLog("Redis MSET via proxy", {
           keyCount: Object.keys(keyValuePairs).length,
         });
         const args = [];
@@ -509,7 +511,7 @@ class RedisClass {
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error("Failed to set multiple keys", error, {
+      Logger.writeLog("Failed to set multiple keys", error, {
         keyCount: Object.keys(keyValuePairs).length,
       });
       throw ErrorHandler.databaseError("Failed to set multiple keys", error, {
@@ -525,24 +527,24 @@ class RedisClass {
    */
   static async del(key) {
     try {
-      Logger.debug("Deleting Redis key", { key });
+      Logger.writeLog("Deleting Redis key", { key });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         return await staticClient.del(key);
       } else {
-        Logger.debug("Redis DEL via proxy", { key });
+        Logger.writeLog("Redis DEL via proxy", { key });
         const command = addEnvCommandPrefix(`del(#${key})`);
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error(`Failed to delete key ${key}`, error, { key });
-      throw ErrorHandler.databaseError(`Failed to delete key ${key}`, error, {
+      Logger.writeLog(`Failed to delete key ${key}`, error, { key });
+      throw ErrorHandler.add_error(`Failed to delete key ${key}`, error, {
         key,
       });
     }
@@ -555,29 +557,27 @@ class RedisClass {
    */
   static async mdel(...keys) {
     try {
-      Logger.debug("Deleting multiple Redis keys", { keys });
+      Logger.writeLog("Deleting multiple Redis keys", { keys });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         return await staticClient.del(keys);
       } else {
-        Logger.debug("Redis DEL multiple via proxy", { keys });
+        Logger.writeLog("Redis DEL multiple via proxy", { keys });
         const keyArgs = keys.map((key) => `#${key}`).join(", ");
         const command = addEnvCommandPrefix(`del(${keyArgs})`);
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error("Failed to delete multiple keys", error, { keys });
-      throw ErrorHandler.databaseError(
-        "Failed to delete multiple keys",
-        error,
-        { keys }
-      );
+      Logger.writeLog("Failed to delete multiple keys", error, { keys });
+      throw ErrorHandler.add_error("Failed to delete multiple keys", error, {
+        keys,
+      });
     }
   }
 
@@ -588,26 +588,28 @@ class RedisClass {
    */
   static async exists(key) {
     try {
-      Logger.debug("Checking if Redis key exists", { key });
+      Logger.writeLog("Checking if Redis key exists", { key });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         const result = await staticClient.exists(key);
         return result === 1;
       } else {
-        Logger.debug("Redis EXISTS via proxy", { key });
+        Logger.writeLog("Redis EXISTS via proxy", { key });
         const command = addEnvCommandPrefix(`exists(#${key})`);
         const result = await RedisHttpProxy(command);
         return result === 1;
       }
     } catch (error) {
-      Logger.error(`Failed to check existence of key ${key}`, error, { key });
-      throw ErrorHandler.databaseError(
+      Logger.writeLog(`Failed to check existence of key ${key}`, error, {
+        key,
+      });
+      throw ErrorHandler.add_error(
         `Failed to check existence of key ${key}`,
         error,
         { key }
@@ -623,29 +625,29 @@ class RedisClass {
    */
   static async expire(key, seconds) {
     try {
-      Logger.debug("Setting Redis key expiry", { key, seconds });
+      Logger.writeLog("Setting Redis key expiry", { key, seconds });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         const result = await staticClient.expire(key, seconds);
         return result === 1;
       } else {
-        Logger.debug("Redis EXPIRE via proxy", { key, seconds });
+        Logger.writeLog("Redis EXPIRE via proxy", { key, seconds });
         const command = addEnvCommandPrefix(`expire(#${key}, ${seconds})`);
         const result = await RedisHttpProxy(command);
         return result === 1;
       }
     } catch (error) {
-      Logger.error(`Failed to set expiry for key ${key}`, error, {
+      Logger.writeLog(`Failed to set expiry for key ${key}`, error, {
         key,
         seconds,
       });
-      throw ErrorHandler.databaseError(
+      throw ErrorHandler.add_error(
         `Failed to set expiry for key ${key}`,
         error,
         { key, seconds }
@@ -660,28 +662,26 @@ class RedisClass {
    */
   static async ttl(key) {
     try {
-      Logger.debug("Getting Redis key TTL", { key });
+      Logger.writeLog("Getting Redis key TTL", { key });
 
       if (
         RedisClass.getEnvironment() === "production" ||
         RedisClass.getEnvironment() === "stage"
       ) {
         if (!isConnected) {
-          throw ErrorHandler.databaseError("Redis not connected");
+          throw ErrorHandler.add_error("Redis not connected");
         }
         return await staticClient.ttl(key);
       } else {
-        Logger.debug("Redis TTL via proxy", { key });
+        Logger.writeLog("Redis TTL via proxy", { key });
         const command = addEnvCommandPrefix(`ttl(#${key})`);
         return await RedisHttpProxy(command);
       }
     } catch (error) {
-      Logger.error(`Failed to get TTL for key ${key}`, error, { key });
-      throw ErrorHandler.databaseError(
-        `Failed to get TTL for key ${key}`,
-        error,
-        { key }
-      );
+      Logger.writeLog(`Failed to get TTL for key ${key}`, error, { key });
+      throw ErrorHandler.add_error(`Failed to get TTL for key ${key}`, error, {
+        key,
+      });
     }
   }
 }
