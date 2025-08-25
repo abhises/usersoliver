@@ -495,10 +495,11 @@ export default class Users {
       if (!this.isUsernameFormatValid(vUsername)) return true; // invalid format treated as not available
       console.log("hi");
       const ownerUid = await RedisClient.get(this.keyUsernameToUid(vUsername));
+      console.log("ownerUid", ownerUid);
       return !!ownerUid;
     } catch (err) {
       ErrorHandler.capture?.(err, { where: "Users.isUsernameTaken", username });
-      return true;
+      return { success: false, error: err.message || "UNKNOWN_ERROR" };
     }
   }
 
@@ -529,25 +530,32 @@ export default class Users {
       if (!this.isUsernameFormatValid(vUsername)) {
         throw new Error("INVALID_USERNAME_FORMAT");
       }
-      // console.log("Setting username: normalized");
+      console.log("Setting username: normalized", vUsername);
 
       const mapKey = this.keyUsernameToUid(vUsername);
       console.log("Setting username: mapKey", mapKey);
 
       // Atomic claim: if key exists and not owned by uid -> conflict
       const existingOwner = await RedisClient.get(mapKey);
-      console.log("Setting username: existingOwner", existingOwner);
-      if (existingOwner && existingOwner !== vUid) {
-        throw new Error("USERNAME_TAKEN");
-      }
+      console.log("Getting username: existingOwner", existingOwner);
+      // if (existingOwner.result !== null) {
+      //   throw new Error("USERNAME_TAKEN");
+      // }
 
       // Fetch previous username (if any) from mirror
       const oldUsername = await RedisClient.get(this.keyUidToUsername(vUid));
-
+      console.log("Setting username: oldUsername", oldUsername);
       // Set mappings
-      await RedisClient.set(mapKey, vUid);
-      await RedisClient.set(this.keyUidToUsername(vUid), vUsername);
-
+      const setMapKeyusernametouid = await RedisClient.set(mapKey, vUid);
+      console.log(
+        "Setting username: setMapKeyusernametouid",
+        setMapKeyusernametouid
+      );
+      const setUidToUsername = await RedisClient.set(
+        this.keyUidToUsername(vUid),
+        vUsername
+      );
+      console.log("Setting username: setUidToUsername", setUidToUsername);
       // Update durable copy
 
       const rows = await db.query(
@@ -555,7 +563,7 @@ export default class Users {
         "UPDATE users SET username_lower = $1, updated_at = NOW() WHERE uid = $2 RETURNING *",
         [vUsername, vUid]
       );
-      console.log("Updated rows:", rows.rows);
+      // console.log("Updated rows:", rows.rows);
 
       // Update CUD cache if exists
       const cudKey = this.keyCriticalUserData(vUid);

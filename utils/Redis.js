@@ -684,6 +684,100 @@ class RedisClass {
       });
     }
   }
+  static async keys(pattern = "*") {
+    try {
+      Logger.writeLog("Fetching Redis keys", { pattern });
+
+      if (
+        RedisClass.getEnvironment() === "production" ||
+        RedisClass.getEnvironment() === "stage"
+      ) {
+        if (!isConnected) {
+          throw ErrorHandler.add_error("Redis not connected");
+        }
+        return await staticClient.keys(pattern);
+      } else {
+        Logger.writeLog("Redis KEYS via proxy", { pattern });
+        const command = addEnvCommandPrefix(`keys(${pattern})`);
+        return await RedisHttpProxy(command);
+      }
+    } catch (error) {
+      Logger.writeLog("Failed to fetch keys", error, { pattern });
+      throw ErrorHandler.add_error("Failed to fetch keys", error, { pattern });
+    }
+  }
+
+  /**
+   * Scan keys (better for production than KEYS)
+   * @param {string} pattern - Key pattern
+   * @param {number} count - Number of keys per batch
+   * @returns {Promise<string[]>}
+   */
+  static async scan(pattern = "*", count = 100) {
+    try {
+      Logger.writeLog("Scanning Redis keys", { pattern, count });
+
+      if (
+        RedisClass.getEnvironment() === "production" ||
+        RedisClass.getEnvironment() === "stage"
+      ) {
+        if (!isConnected) {
+          throw ErrorHandler.add_error("Redis not connected");
+        }
+
+        let cursor = 0;
+        let keys = [];
+
+        do {
+          const reply = await staticClient.scan(cursor, {
+            MATCH: pattern,
+            COUNT: count,
+          });
+          cursor = reply.cursor;
+          keys = keys.concat(reply.keys);
+        } while (cursor !== 0);
+
+        return keys;
+      } else {
+        Logger.writeLog("Redis SCAN via proxy", { pattern, count });
+        const command = addEnvCommandPrefix(
+          `scan(0, MATCH, ${pattern}, COUNT, ${count})`
+        );
+        return await RedisHttpProxy(command);
+      }
+    } catch (error) {
+      Logger.writeLog("Failed to scan keys", error, { pattern, count });
+      throw ErrorHandler.add_error("Failed to scan keys", error, {
+        pattern,
+        count,
+      });
+    }
+  }
+  static async getAllKeysAndValues(pattern = "*") {
+    try {
+      const keysResponse = await RedisClass.keys(pattern);
+
+      // Handle proxy response (development mode)
+      const keys =
+        keysResponse && keysResponse.result
+          ? keysResponse.result
+          : keysResponse;
+
+      if (!Array.isArray(keys)) return [];
+
+      const result = [];
+      for (const key of keys) {
+        const value = await RedisClass.get(key);
+        result.push({ key, value });
+      }
+      return result;
+    } catch (error) {
+      Logger.writeLog("Failed to get all keys and values", error, { pattern });
+      throw ErrorHandler.add_error("Failed to get all keys and values", error, {
+        pattern,
+      });
+    }
+  }
 }
 
 export default RedisClass;
