@@ -43,4 +43,4 @@ export {
 // 10) testUpdateUserField
 // 11) testBuildUserData
 // 12) testBuildUserSettings
-// 13) testGetBatchOnlineStatus
+// 13) testGetBatchOnlineStatus little check needed

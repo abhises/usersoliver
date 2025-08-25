@@ -8,11 +8,11 @@ import {
 
 export default class Users {
   static REDIS_KEY_PREFIX = Object.freeze({
-    CRITICAL_USER_DATA: "cud:",
-    PRESENCE_SUMMARY_USER: "presence:summary:user:",
-    PRESENCE_OVERRIDE_USER: "presence:override:user:",
-    USERNAME_TO_UID: "username:to:uid:",
-    UID_TO_USERNAME: "uid:to:username:",
+    CRITICAL_USER_DATA: "cud",
+    PRESENCE_SUMMARY_USER: "presence_summary_user_",
+    PRESENCE_OVERRIDE_USER: "presence_override_user_",
+    USERNAME_TO_UID: "username_to_uid_",
+    UID_TO_USERNAME: "uid_to_username_",
   });
 
   static REDIS_TIMING_SECONDS = Object.freeze({
@@ -296,13 +296,17 @@ export default class Users {
    */
   static async getOnlineStatus(uid) {
     try {
-      const { uid: vUid } = validateInputs({
+      const { uid: vUid } = this.validateInputs({
         uid: { value: uid, type: "string", required: true, trim: true },
       });
-
+      // console.log("hello online", vUid);
       // 1) Check override
       const override = await RedisClient.get(this.keyPresenceOverride(vUid));
-      if (override === this.PRESENCE_MODE.OFFLINE)
+      console.log("override", override);
+      if (
+        override.result === this.PRESENCE_MODE.OFFLINE ||
+        override.result === null
+      )
         return { online: false, status: "offline" };
       if (override === this.PRESENCE_MODE.AWAY)
         return { online: true, status: "away" };
@@ -332,9 +336,9 @@ export default class Users {
 
       // overrides
       const overrideKeys = vUids.map(this.keyPresenceOverride);
-      // console.log("Override keys:", overrideKeys);
+      console.log("Override keys:", overrideKeys);
       const overrides = await RedisClient.mget(...overrideKeys);
-      // console.log("Overrides:", overrides);
+      console.log("Overrides:", overrides);
       // summaries
       const summaryKeys = vUids.map(this.keyPresenceSummary);
       const summaries = await RedisClient.mget(...summaryKeys);
@@ -384,9 +388,13 @@ export default class Users {
       });
 
       // Refresh presence summary TTL
-      await RedisClient.set(this.keyPresenceSummary(vUid), "1", {
+      const result = await RedisClient.set(this.keyPresenceSummary(vUid), {
         expiry: this.REDIS_TIMING_SECONDS.PRESENCE_TTL,
       });
+      console.log("result", result);
+
+      // const second = await RedisClient.get("presence_summary_user_u1");
+      // console.log("second", second);
 
       // OPTIONAL: Throttle durable lastActivityAt write in Postgres (e.g., once per 60s)
       // Reads are Redis-only; this is purely for analytics/labels.
@@ -406,7 +414,7 @@ export default class Users {
       //   `,
       //   [vUid]
       // );
-      console.log("Update result:", update);
+      // console.log("Update result:", update);
 
       // Bust CUD so next read merges fresh presence if needed
       await RedisClient.del(this.keyCriticalUserData(vUid));
@@ -441,9 +449,13 @@ export default class Users {
       });
 
       // console.log("setPresenceOverride", { uid: vUid, mode: vMode });
-      await RedisClient.set(this.keyPresenceOverride(vUid), vMode); // no TTL
-      await RedisClient.del(this.keyCriticalUserData(vUid)); // bust CUD
-
+      const result1 = await RedisClient.set(
+        this.keyPresenceOverride(vUid),
+        vMode
+      ); // no TTL
+      const result2 = await RedisClient.del(this.keyCriticalUserData(vUid)); // bust CUD
+      console.log("result1", result1);
+      console.log("result2", result2);
       // Persist preference for rebuild only
       const result = await db.query(
         "default",
@@ -496,7 +508,9 @@ export default class Users {
       console.log("hi");
       const ownerUid = await RedisClient.get(this.keyUsernameToUid(vUsername));
       console.log("ownerUid", ownerUid);
-      return !!ownerUid;
+      return !!ownerUid?.result;
+
+      // if (ownerUid.result === null) return false;
     } catch (err) {
       ErrorHandler.capture?.(err, { where: "Users.isUsernameTaken", username });
       return { success: false, error: err.message || "UNKNOWN_ERROR" };
@@ -524,41 +538,42 @@ export default class Users {
         },
       });
 
-      console.log("Setting username: lower", vUid, vUsernameRaw);
+      // console.log("Setting username: lower", vUid, vUsernameRaw);
 
       const vUsername = this.normalizeUsername(vUsernameRaw);
       if (!this.isUsernameFormatValid(vUsername)) {
         throw new Error("INVALID_USERNAME_FORMAT");
       }
-      console.log("Setting username: normalized", vUsername);
+      // console.log("Setting username: normalized", vUsername);
 
       const mapKey = this.keyUsernameToUid(vUsername);
-      console.log("Setting username: mapKey", mapKey);
+      // console.log("Setting username: mapKey", mapKey);
 
       // Atomic claim: if key exists and not owned by uid -> conflict
       const existingOwner = await RedisClient.get(mapKey);
-      console.log("Getting username: existingOwner", existingOwner);
-      // if (existingOwner.result !== null) {
-      //   throw new Error("USERNAME_TAKEN");
-      // }
+      // console.log("Getting username: existingOwner", existingOwner);
+      if (existingOwner.result !== null) {
+        throw new Error("USERNAME_TAKEN");
+      }
 
       // Fetch previous username (if any) from mirror
-      const oldUsername = await RedisClient.get(this.keyUidToUsername(vUid));
-      console.log("Setting username: oldUsername", oldUsername);
+      // const oldUsername =
+      await RedisClient.get(this.keyUidToUsername(vUid));
+      // console.log("Setting username: oldUsername", oldUsername);
       // Set mappings
-      const setMapKeyusernametouid = await RedisClient.set(mapKey, vUid);
-      console.log(
-        "Setting username: setMapKeyusernametouid",
-        setMapKeyusernametouid
-      );
-      const setUidToUsername = await RedisClient.set(
-        this.keyUidToUsername(vUid),
-        vUsername
-      );
-      console.log("Setting username: setUidToUsername", setUidToUsername);
+      // const setMapKeyusernametouid =
+      await RedisClient.set(mapKey, vUid);
+      // console.log(
+      //   "Setting username: setMapKeyusernametouid",
+      //   setMapKeyusernametouid
+      // );
+      // const setUidToUsername =
+      await RedisClient.set(this.keyUidToUsername(vUid), vUsername);
+      // console.log("Setting username: setUidToUsername", setUidToUsername);
       // Update durable copy
 
-      const rows = await db.query(
+      // const rows =
+      await db.query(
         "default",
         "UPDATE users SET username_lower = $1, updated_at = NOW() WHERE uid = $2 RETURNING *",
         [vUsername, vUid]

@@ -1,7 +1,7 @@
 import Users from "../service/Users.js";
 
 export default async function setUserNameTest() {
-  const res = await Users.setUsername("u10", "delish");
+  const res = await Users.setUsername("u10", "belish");
   console.log(res); // { success: true, previous: null }
 
   // ➡️ Then check:

@@ -10,9 +10,17 @@ export default async function testRedisConnection() {
     const testValue = { hello: "world" };
     const testKey1 = "test_key_1";
     const testValue1 = 20;
+    const testKey3 = "username:to:uid:nepali4";
 
-    const setting = await Redis.set(testKey, testValue, { expiry: 10 });
-    const setting1 = await Redis.set(testKey1, testValue1, { expiry: 10 });
+    const user1Key = "presence_override_user_u1";
+    const user2Key = "presence_override_user_u2";
+
+    // Set presence (online/offline)
+    await Redis.set(user1Key, "online");
+    await Redis.set(user2Key, "offline");
+
+    const setting = await Redis.set(testKey, testValue);
+    const setting1 = await Redis.set(testKey1, testValue1);
 
     console.log("Set operation result:", setting);
     console.log("Set operation result for test_key_1:", setting1);
@@ -20,6 +28,8 @@ export default async function testRedisConnection() {
     console.log("Getting from Redis:", value);
     const value1 = await Redis.get(testKey1);
     console.log("Value from Redis:", value1);
+    const value3 = await Redis.get(testKey3);
+    console.log("Value from Redis:", value3);
 
     const keys = await Redis.keys("*");
     console.log("All keys:", keys);
